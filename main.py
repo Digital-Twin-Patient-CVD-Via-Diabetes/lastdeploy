@@ -35,7 +35,7 @@ def load_model():
 class HealthInput(BaseModel):
     Blood_Pressure: Optional[float] = None
     Age: Optional[int] = None
-    Exercise_Hours_Per_Week:Optional[float] = None
+    Exercise_Hours_Per_Week: Optional[float] = None
     Diet: Optional[str] = None 
     Sleep_Hours_Per_Day: Optional[float] = None
     Stress_Level: Optional[int] = None
@@ -44,10 +44,10 @@ class HealthInput(BaseModel):
     hypertension: Optional[int] = None 
     is_smoking: Optional[int] = None
     #is_pregnant: Optional[int] = None
-    hemoglobin_a1c:Optional[float] = None
+    hemoglobin_a1c: Optional[float] = None
     Diabetes_pedigree: Optional[float] = None
     CVD_Family_History: Optional[int] = None
-    ld_value:Optional[float] = None
+    ld_value: Optional[float] = None
     admission_tsh: Optional[float] = None
     is_alcohol_user: Optional[int] = None
     creatine_kinase_ck: Optional[float] = None
@@ -147,7 +147,49 @@ def preprocess_data(input_data, model):
     
     return processed_data, original_values
 
-# Probability calculation using pgmpy
+def analyze_feature_impact(model, evidence, target_vars=['diabetes', 'heart_disease']):
+    """
+    Analyze how much each feature affects the target variables.
+    Returns a dictionary of impact factors for each target variable.
+    """
+    infer = VariableElimination(model)
+    impacts = {target: {} for target in target_vars}
+    
+    # Get baseline probabilities
+    baseline_probs = {}
+    for target in target_vars:
+        query = infer.query(variables=[target], evidence=evidence)
+        baseline_probs[target] = query.values[1] if target in query.state_names else 0.0
+    
+    # Calculate impact of each evidence variable
+    for feature in evidence.keys():
+        # Get all possible states for this feature
+        try:
+            states = model.get_cpds(feature).state_names[feature]
+        except:
+            continue
+            
+        for target in target_vars:
+            max_diff = 0
+            for state in states:
+                # Create modified evidence with this feature set to each possible state
+                modified_evidence = evidence.copy()
+                modified_evidence[feature] = state
+                
+                # Get probability with modified evidence
+                query = infer.query(variables=[target], evidence=modified_evidence)
+                prob = query.values[1] if target in query.state_names else 0.0
+                
+                # Calculate difference from baseline
+                diff = abs(prob - baseline_probs[target])
+                if diff > max_diff:
+                    max_diff = diff
+            
+            # Store the maximum impact this feature had on the target
+            impacts[target][feature] = max_diff
+    
+    return impacts
+
 def calculate_probabilities(model, evidence: dict):
     infer = VariableElimination(model)
 
@@ -159,6 +201,25 @@ def calculate_probabilities(model, evidence: dict):
     heart_disease_prob = float(heart_result.values[1])
     
     return diabetes_prob, heart_disease_prob
+
+def format_impacts(impacts, threshold=0.05):
+    """Format the impacts dictionary for API response"""
+    formatted = {}
+    for disease, features in impacts.items():
+        # Sort features by impact (descending)
+        sorted_features = sorted(features.items(), key=lambda x: x[1], reverse=True)
+        
+        # Filter features with impact >= threshold
+        significant_features = [
+            {"feature": feature, "impact": f"{impact:.2%}"}
+            for feature, impact in sorted_features
+            if impact >= threshold
+        ]
+        
+        # Limit to top 5 features
+        formatted[disease] = significant_features[:5]
+    
+    return formatted
 
 # Prediction endpoint
 @app.post("/predict")
@@ -176,12 +237,18 @@ async def predict_risk(data: HealthInput):
         # Calculate probabilities
         diabetes_prob, heart_disease_prob = calculate_probabilities(model, evidence)
 
+        # Analyze feature impacts
+        feature_impacts = analyze_feature_impact(model, evidence)
+        formatted_impacts = format_impacts(feature_impacts)
+
         return {
             "Input Values": original_values,
             "Health Risk Probabilities": {
                 "Diabetes": f"{diabetes_prob:.2%}",
                 "Heart Disease": f"{heart_disease_prob:.2%}"
-            }
+            },
+            "Feature Impacts": formatted_impacts,
+            "Impact Interpretation": "The impact values show how much each feature could potentially change the disease probability when varied across its possible states."
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Prediction failed: {str(e)}"})
